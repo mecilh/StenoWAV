@@ -1,3 +1,5 @@
 build/
 *.o
 *.d
+*.wav
+!audio_sources/*.wav
