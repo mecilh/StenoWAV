@@ -1,3 +1,0 @@
-/home/mecilh/Sandboxing/CPP/Steno/build/CMakeFiles/stenowav.dir
-/home/mecilh/Sandboxing/CPP/Steno/build/CMakeFiles/edit_cache.dir
-/home/mecilh/Sandboxing/CPP/Steno/build/CMakeFiles/rebuild_cache.dir
