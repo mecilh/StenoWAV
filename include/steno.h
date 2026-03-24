@@ -11,7 +11,8 @@ struct EncodeResult {
 
 // Encode a message into scattered WAV samples using PRNG-linked traversal.
 // Returns the auto-generated cipher needed for decoding.
-EncodeResult steno_encode(Wav& wav, const std::string& message);
+// If dither=true, LSB noise is applied to all samples to mask embed positions.
+EncodeResult steno_encode(Wav& wav, const std::string& message, bool dither = false);
 
 // Decode a hidden message using the cipher from encoding.
 std::string steno_decode(const Wav& wav, const std::string& cipher);

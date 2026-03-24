@@ -6,8 +6,10 @@
 static void print_usage(const char* prog) {
     std::cerr << "StenoWAV v0.2.0 - Scatter-Embed Audio Steganography\n\n"
               << "Usage:\n"
-              << "  " << prog << " encode <input.wav> <output.wav> \"message\"\n"
+              << "  " << prog << " encode [--dither] <input.wav> <output.wav> \"message\"\n"
               << "  " << prog << " decode <input.wav> <cipher>\n\n"
+              << "Options:\n"
+              << "  --dither  Add LSB noise to all samples to mask embed positions in FFT\n\n"
               << "The cipher is auto-generated during encoding and required for decoding.\n";
 }
 
@@ -20,15 +22,23 @@ int main(int argc, char* argv[]) {
     std::string mode = argv[1];
 
     if (mode == "encode") {
-        if (argc != 5) {
+        // Parse optional --dither flag
+        bool dither = false;
+        int argOffset = 2;
+        if (argc > 2 && std::string(argv[2]) == "--dither") {
+            dither = true;
+            argOffset = 3;
+        }
+
+        if (argc - argOffset != 3) {
             std::cerr << "Error: encode requires 3 arguments\n\n";
             print_usage(argv[0]);
             return 1;
         }
 
-        std::string inputPath = argv[2];
-        std::string outputPath = argv[3];
-        std::string message = argv[4];
+        std::string inputPath = argv[argOffset];
+        std::string outputPath = argv[argOffset + 1];
+        std::string message = argv[argOffset + 2];
 
         Wav wav(inputPath);
 
@@ -37,7 +47,7 @@ int main(int argc, char* argv[]) {
                   << wav.fmt.NbrChannel << " channel(s), "
                   << wav.fmt.Frequency << " Hz\n";
 
-        auto result = steno_encode(wav, message);
+        auto result = steno_encode(wav, message, dither);
 
         if (!result.success) {
             std::cerr << "Error: encoding failed (message too large or not enough valid samples).\n";
