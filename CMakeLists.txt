@@ -8,6 +8,7 @@ add_executable(stenowav
     src/main.cpp
     src/wav.cpp
     src/steno.cpp
+    src/steno_freq.cpp
 )
 
 target_include_directories(stenowav PRIVATE include)

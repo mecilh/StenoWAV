@@ -99,18 +99,15 @@ static int bit_budget(const std::vector<uint8_t>& /*samples*/, int /*idx*/, bool
 }
 
 // --- Select which bit positions to use within the budget ---
+// Only uses bits 0..budget-1 so the max perturbation is bounded by the budget.
 
-static std::vector<int> select_bit_positions(Xoshiro256ss& prng, int budget) {
-    // Candidates: bits 0-3 of the sample
-    std::vector<int> candidates = {0, 1, 2, 3};
-    // Fisher-Yates partial shuffle to pick 'budget' positions
+static std::vector<int> select_bit_positions(int budget) {
+    std::vector<int> positions;
+    positions.reserve(budget);
     for (int i = 0; i < budget; i++) {
-        int j = i + static_cast<int>(prng.next_bounded(4 - i));
-        std::swap(candidates[i], candidates[j]);
+        positions.push_back(i);
     }
-    candidates.resize(budget);
-    std::sort(candidates.begin(), candidates.end());
-    return candidates;
+    return positions;
 }
 
 // --- Header embedding/extraction (samples 0-95, LSB only) ---
@@ -143,7 +140,7 @@ static uint32_t extract_msg_len(const std::vector<T>& samples) {
 
 // --- Core encode/decode ---
 
-EncodeResult steno_encode(Wav& wav, const std::string& message) {
+EncodeResult steno_encode(Wav& wav, const std::string& message, bool dither) {
     EncodeResult result{false, ""};
     uint32_t msgLen = static_cast<uint32_t>(message.size());
     uint32_t totalBitsNeeded = msgLen * 8;
@@ -201,16 +198,12 @@ EncodeResult steno_encode(Wav& wav, const std::string& message) {
 
         // 6. Embed data into scatter positions with adaptive bit depth
         uint32_t bitCursor = 0;
-        // We need a second PRNG stream for bit-position selection,
-        // seeded deterministically from the same base seed.
-        Xoshiro256ss bitPrng;
-        bitPrng.seed_from(seed ^ 0xDEADBEEFCAFE1234ULL);
 
         for (int idx : pool) {
             if (bitCursor >= totalBitsNeeded) break;
 
             int budget = bit_budget(samples, idx, is_8bit);
-            auto bitPositions = select_bit_positions(bitPrng, budget);
+            auto bitPositions = select_bit_positions(budget);
 
             for (int bp : bitPositions) {
                 if (bitCursor >= totalBitsNeeded) break;
@@ -223,6 +216,40 @@ EncodeResult steno_encode(Wav& wav, const std::string& message) {
 
         if (bitCursor < totalBitsNeeded) {
             return; // not enough capacity
+        }
+
+        // 7. Optional dither: add LSB noise to ALL samples to mask embed positions
+        if (dither) {
+            Xoshiro256ss ditherPrng;
+            ditherPrng.seed_from(nonce ^ 0xA5A5A5A5A5A5A5A5ULL);
+            for (size_t i = 0; i < samples.size(); i++) {
+                // Flip bit 0 with 50% probability on non-embedded samples
+                // For embedded samples this just adds another layer of noise
+                if (ditherPrng.next() & 1) {
+                    samples[i] ^= static_cast<T>(1);
+                }
+            }
+            // Re-embed the header so it survives the dither
+            embed_header(samples, nonce, msgLen);
+            // Re-embed the data bits on top of dither
+            bitCursor = 0;
+            // Re-seed and re-shuffle a fresh pool copy for deterministic replay
+            Xoshiro256ss prng2;
+            prng2.seed_from(seed);
+            std::vector<int> pool2 = pool;
+            // pool was already shuffled in-place, reuse it directly
+            for (int idx : pool) {
+                if (bitCursor >= totalBitsNeeded) break;
+                int b = bit_budget(samples, idx, is_8bit);
+                auto bps = select_bit_positions(b);
+                for (int bp : bps) {
+                    if (bitCursor >= totalBitsNeeded) break;
+                    T mask = static_cast<T>(1) << bp;
+                    T dataBit = static_cast<T>(msgBits[bitCursor]) << bp;
+                    samples[idx] = (samples[idx] & ~mask) | dataBit;
+                    bitCursor++;
+                }
+            }
         }
 
         result.success = true;
@@ -282,9 +309,6 @@ std::string steno_decode(const Wav& wav, const std::string& cipher) {
         }
 
         // 4. Extract data bits from scatter positions
-        Xoshiro256ss bitPrng;
-        bitPrng.seed_from(seed ^ 0xDEADBEEFCAFE1234ULL);
-
         std::vector<int> msgBits;
         msgBits.reserve(totalBitsNeeded);
 
@@ -292,7 +316,7 @@ std::string steno_decode(const Wav& wav, const std::string& cipher) {
             if (static_cast<uint32_t>(msgBits.size()) >= totalBitsNeeded) break;
 
             int budget = bit_budget(samples, idx, is_8bit);
-            auto bitPositions = select_bit_positions(bitPrng, budget);
+            auto bitPositions = select_bit_positions(budget);
 
             for (int bp : bitPositions) {
                 if (static_cast<uint32_t>(msgBits.size()) >= totalBitsNeeded) break;
