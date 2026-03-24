@@ -4,11 +4,16 @@
 #include "wav.h"
 #include <string>
 
-// Encode a text message into the LSBs of WAV audio samples.
-// Returns false if the message is too large for the audio file.
-bool steno_encode(Wav& wav, const std::string& message);
+struct EncodeResult {
+    bool success;
+    std::string cipher;  // hex-encoded 64-bit nonce
+};
 
-// Decode a hidden message from the LSBs of WAV audio samples.
-std::string steno_decode(const Wav& wav);
+// Encode a message into scattered WAV samples using PRNG-linked traversal.
+// Returns the auto-generated cipher needed for decoding.
+EncodeResult steno_encode(Wav& wav, const std::string& message);
+
+// Decode a hidden message using the cipher from encoding.
+std::string steno_decode(const Wav& wav, const std::string& cipher);
 
 #endif
