@@ -1,0 +1,897 @@
+% ══════════════════════════════════════════════════════════════════════
+% StenoWav — Technical Reference & Mathematical Formalisation
+% ══════════════════════════════════════════════════════════════════════
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+
+\geometry{margin=2.5cm, headheight=14.5pt}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black, urlcolor=blue!60!black}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textit{StenoWav Technical Reference}}
+\lhead{\textit{\nouppercase{\leftmark}}}
+\rfoot{\thepage}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% Custom commands
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\xor}{\oplus}
+\newcommand{\floor}[1]{\left\lfloor #1 \right\rfloor}
+\newcommand{\ceil}[1]{\left\lceil #1 \right\rceil}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\norm}[1]{\left\| #1 \right\|}
+\DeclareMathOperator{\round}{round}
+\DeclareMathOperator{\argmin}{argmin}
+\DeclareMathOperator{\rms}{RMS}
+\DeclareMathOperator{\snr}{SNR}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    framesep=3pt,
+    backgroundcolor=\color{gray!8},
+}
+
+\title{
+    \textbf{StenoWav} \\[0.5em]
+    \Large Technical Reference \& Mathematical Formalisation \\[0.3em]
+    \normalsize Version 0.1.0
+}
+\author{StenoWav Project}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ──────────────────────────────────────────────────────────────────
+\section{Introduction}
+% ──────────────────────────────────────────────────────────────────
+
+StenoWav is an audio steganography framework that embeds arbitrary binary data
+inside 16-bit PCM WAV audio signals.  The core embedding primitive is
+\emph{Quantisation Index Modulation} (QIM), applied through a packet-based
+architecture with per-packet cipher obfuscation.
+
+The framework supports two embedding domains:
+\begin{enumerate}
+    \item \textbf{Time domain} --- direct modification of PCM samples.
+    \item \textbf{Frequency domain} --- modification of DFT magnitude
+          coefficients, with phase preservation and IDFT reconstruction.
+\end{enumerate}
+
+Both paths use RMS-adaptive segment analysis to restrict embedding to
+signal regions with sufficient energy, and an optional dither pass to
+raise the statistical noise floor.
+
+This document provides the full mathematical formalisation of every
+algorithm in the pipeline, along with proofs of key properties (distortion
+bounds, extraction correctness, security guarantees).
+
+\subsection{Notation}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$x \in \R$ & A single audio sample (normalised to $[-1, 1]$) \\
+$\Delta \in \R^+$ & QIM step size (quantisation interval) \\
+$q \in \Z$ & Quantisation index: $q = \round(x / \Delta)$ \\
+$M \in \N$ & QIM modulus (number of lattice classes) \\
+$s \in \{0, \ldots, M-1\}$ & Symbol to embed \\
+$b \in \{0, 1\}$ & Single bit to embed (special case $M=2$) \\
+$K \in \{0, \ldots, 2^{16}-1\}$ & 16-bit cipher key \\
+$\sigma$ & 32-byte master seed \\
+$p$ & Packet number ($p \in \N_0$) \\
+$\F$ & Discrete Fourier Transform \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Quantisation Index Modulation (QIM)}
+\label{sec:qim}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Standard QIM ($M = 2$)}
+
+\begin{definition}[QIM Lattice]
+Given step size $\Delta > 0$, define the quantisation lattice
+$\Lambda = \{ k\Delta : k \in \Z \}$.
+Partition $\Lambda$ into two sub-lattices indexed by parity:
+\[
+    \Lambda_b = \{ k\Delta : k \equiv b \pmod{2} \}, \quad b \in \{0,1\}.
+\]
+\end{definition}
+
+\begin{definition}[QIM Embedding]
+Given sample $x$ and bit $b$:
+\begin{enumerate}
+    \item Compute the quantisation index $q = \round(x / \Delta)$.
+    \item If $q \bmod 2 = b$, set $q^* = q$ (no shift needed).
+    \item If $q \bmod 2 \neq b$, pick the nearest index with correct parity:
+    \[
+        q^* = \begin{cases}
+            q + 1 & \text{if } x \geq q\Delta, \\
+            q - 1 & \text{otherwise.}
+        \end{cases}
+    \]
+    \item Output $x' = q^* \Delta$.
+\end{enumerate}
+\end{definition}
+
+\begin{definition}[QIM Extraction]
+Given watermarked sample $x'$:
+\[
+    \hat{b} = \round(x' / \Delta) \bmod 2.
+\]
+\end{definition}
+
+\begin{theorem}[Extraction correctness]
+\label{thm:qim-correct}
+For any $x \in \R$, $b \in \{0,1\}$, and $\Delta > 0$, let $x' = \mathrm{QIM}_\Delta(x, b)$.
+Then $\round(x' / \Delta) \bmod 2 = b$.
+\end{theorem}
+
+\begin{proof}
+By construction, $x' = q^*\Delta$ where $q^* \equiv b \pmod{2}$.
+Since $\round(q^*\Delta / \Delta) = q^*$, the extracted parity is
+$q^* \bmod 2 = b$.
+\end{proof}
+
+\begin{theorem}[Distortion bound]
+\label{thm:distortion}
+For any embedding $x' = \mathrm{QIM}_\Delta(x, b)$:
+\[
+    \abs{x' - x} \leq \Delta.
+\]
+\end{theorem}
+
+\begin{proof}
+In the worst case, $x$ lies exactly at $q\Delta$ with $q \bmod 2 \neq b$,
+requiring a shift to $q^* = q \pm 1$, giving $\abs{x' - x} = \Delta$.
+In all other cases the shift is smaller.
+\end{proof}
+
+\subsection{Multi-Symbol QIM ($M \geq 2$)}
+\label{sec:mod-m-qim}
+
+\begin{definition}[Mod-$M$ QIM]
+Partition $\Lambda$ into $M$ sub-lattices:
+$\Lambda_s = \{ k\Delta : k \equiv s \pmod{M} \}$ for $s \in \{0, \ldots, M-1\}$.
+
+Embedding symbol $s$ into sample $x$:
+\begin{enumerate}
+    \item $q = \round(x / \Delta)$.
+    \item $r = q \bmod M$ (using Euclidean remainder).
+    \item If $r = s$, output $q\Delta$.
+    \item Otherwise, compute the forward offset $d = (s - r) \bmod M$:
+          \begin{align}
+              q_{\uparrow} &= q + d, \\
+              q_{\downarrow} &= q + d - M.
+          \end{align}
+    \item Pick the candidate closer to $x$:
+          \[
+              q^* = \argmin_{q' \in \{q_\uparrow, q_\downarrow\}} \abs{q'\Delta - x}.
+          \]
+    \item Output $x' = q^* \Delta$.
+\end{enumerate}
+\end{definition}
+
+Extraction: $\hat{s} = \round(x'/\Delta) \bmod M$.
+
+\begin{proposition}[Mod-$M$ distortion bound]
+$\abs{x' - x} \leq M\Delta / 2$ for any mod-$M$ QIM embedding.
+\end{proposition}
+
+\begin{proof}
+The maximum distance between $x$ and the nearest lattice point of class $s$
+is bounded by the half-period of the sub-lattice spacing, which is $M\Delta/2$.
+\end{proof}
+
+\begin{remark}
+StenoWav uses $M = 4$ for mask samples (2 bits per sample) and $M = 2$
+for data samples (1 bit per sample).  The mask modulus $M = 4$ gives a
+maximum per-sample distortion of $2\Delta$ versus $\Delta$ for $M = 2$.
+\end{remark}
+
+\subsection{Non-Negative QIM}
+\label{sec:nonneg-qim}
+
+In the frequency domain, embedding operates on magnitude coefficients
+$\abs{X_k} \geq 0$.  Standard QIM can produce negative outputs when
+$q^* < 0$, but negative magnitudes are physically meaningless and
+would lose their sign through $\sqrt{\mathrm{Re}^2 + \mathrm{Im}^2}$
+on re-extraction.
+
+\begin{definition}[Non-negative mod-$M$ QIM]
+Identical to Definition~2.4, except that $q_{\downarrow}$ is only
+considered if $q_{\downarrow} \geq 0$.  If $q_{\downarrow} < 0$,
+only $q_{\uparrow}$ is used.  Formally:
+\[
+    q^* = \begin{cases}
+        \displaystyle\argmin_{q' \in \{q_\uparrow, q_\downarrow\}} \abs{q'\Delta - x}
+            & \text{if } q_\downarrow \geq 0, \\[6pt]
+        q_\uparrow & \text{otherwise.}
+    \end{cases}
+\]
+\end{definition}
+
+Extraction constrains the quantisation index similarly:
+$\hat{s} = \max(0, \round(x'/\Delta)) \bmod M$.
+
+\begin{proposition}
+Non-negative mod-$M$ QIM preserves extraction correctness for all $x \geq 0$.
+\end{proposition}
+
+\begin{proof}
+For $x \geq 0$, $q = \round(x/\Delta) \geq 0$, and the selected $q^* \geq 0$
+by construction.  Since $q^* \equiv s \pmod{M}$ and
+$\round(q^*\Delta / \Delta) = q^* \geq 0$, the extraction
+$\max(0, q^*) \bmod M = s$.
+\end{proof}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Packet Architecture}
+\label{sec:packet}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Packet Structure}
+
+Each packet embeds 2 bytes (16 bits) of payload using 9 non-contiguous
+sample positions selected pseudorandomly:
+
+\begin{center}
+\begin{tabular}{@{}ccl@{}}
+\toprule
+Component & Count & Role \\
+\midrule
+Mask samples & 8 & Derive per-packet cipher via mod-4 QIM \\
+Data region & 1 start index & 16 consecutive samples, 1 bit each via mod-2 QIM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Total samples modified per packet: $8 + 16 = 24$.
+
+\subsection{Index Selection}
+
+Indices are selected via ChaCha20 CSPRNG, seeded from the master seed
+$\sigma$ mixed with the packet number $p$:
+\[
+    \sigma_p = \sigma \xor (\underbrace{0, \ldots, 0}_{24}, p_0, p_1, \ldots, p_7),
+\]
+where $p_0, \ldots, p_7$ are the little-endian bytes of $p \in \N_0$.
+
+From RNG stream $G(\sigma_p)$, 9 unique indices are drawn via rejection
+sampling within the eligible pool (see Section~\ref{sec:rms}).  The first
+8 indices are mask positions; the 9th is the data region start.
+
+\subsection{Cipher Derivation}
+\label{sec:cipher}
+
+\begin{definition}[Cipher key]
+A 16-bit value $K \in \{0, \ldots, 2^{16}-1\}$ derived from 8 mask samples.
+Each mask sample $i$ contributes a 2-bit symbol $s_i \in \{0,1,2,3\}$
+via mod-4 QIM extraction:
+\[
+    K = \sum_{i=0}^{7} s_i \cdot 4^{7-i}
+      = \sum_{i=0}^{7} s_i \cdot 2^{2(7-i)}.
+\]
+Equivalently, $K$ is the concatenation of 8 two-bit values
+$(s_0, s_1, \ldots, s_7)$ in big-endian order.
+\end{definition}
+
+\textbf{Encoding:}
+A random cipher $K$ is generated from a \emph{separate} ChaCha20 stream
+(seed byte 0 flipped: $\sigma' = \sigma \xor (0\text{xFF}, 0, \ldots, 0)$,
+then mixed with $p$).  The symbols $s_i = (K \gg 2(7-i)) \mathbin{\&} 3$
+are embedded into the mask samples via mod-4 QIM.
+
+\textbf{Decoding:}
+The decoder recomputes mask positions from $\sigma$ and $p$, extracts
+mod-4 residues from each mask sample, and reconstructs $K$.
+
+\subsection{Payload Embedding}
+
+Given payload bytes $(b_\mathrm{hi}, b_\mathrm{lo})$ and cipher $K$:
+\begin{enumerate}
+    \item Concatenate into 16-bit word: $P = b_\mathrm{hi} \cdot 256 + b_\mathrm{lo}$.
+    \item Encrypt: $P' = P \xor K$.
+    \item Embed $P'$ bit-by-bit into the 16 consecutive samples starting
+          at $\mathrm{data\_index}$, MSB first, using standard mod-2 QIM.
+\end{enumerate}
+
+\textbf{Extraction:}
+\begin{enumerate}
+    \item Extract 16 bits from the data region via mod-2 QIM.
+    \item Reassemble into $P'$.
+    \item Decrypt: $P = P' \xor K$ (XOR is self-inverse).
+\end{enumerate}
+
+\begin{proposition}[XOR cipher involution]
+$\forall P, K: (P \xor K) \xor K = P$.
+\end{proposition}
+
+\subsection{Stream Framing}
+
+An arbitrary byte stream is framed into packets:
+\begin{itemize}
+    \item Each packet carries 2 bytes.
+    \item If the data length is odd, a zero byte is appended.
+    \item Total packets: $N_\text{data} = \ceil{|\text{data}| / 2}$.
+    \item The decoder uses the original length (from the header) to
+          truncate any padding byte.
+\end{itemize}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Self-Contained Header}
+\label{sec:header}
+% ──────────────────────────────────────────────────────────────────
+
+The first 7 packets embed a 14-byte metadata header, enabling decoding
+with only the watermarked signal, seed, and configuration.
+
+\begin{center}
+\begin{tabular}{@{}ccl@{}}
+\toprule
+Bytes & Width & Content \\
+\midrule
+0--3 & 4 & Magic: \texttt{0x5354454E} (ASCII ``STEN'') \\
+4    & 1 & Domain: $0 =$ Time, $1 =$ Frequency \\
+5    & 1 & Reserved (0x00) \\
+6--9 & 4 & \texttt{original\_len} (u32, big-endian) \\
+10--13 & 4 & \texttt{num\_data\_packets} (u32, big-endian) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Packet layout:}
+\[
+    \underbrace{p_0, p_1, \ldots, p_6}_{\text{header (7 packets)}} \quad
+    \underbrace{p_7, p_8, \ldots, p_{6+N}}_{\text{data ($N$ packets)}}
+\]
+
+The magic bytes serve as a validation check: if the wrong seed or delta
+is used, the extracted magic will not match \texttt{STEN}, and decoding
+fails immediately with a descriptive error.
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{RMS-Adaptive Placement}
+\label{sec:rms}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Segment Analysis}
+
+The signal is divided into non-overlapping segments of $L$ samples
+(default $L = 4096$).  For each segment $j$:
+\[
+    \rms_j = \sqrt{\frac{1}{L_j} \sum_{n \in S_j} x_n^2},
+\]
+where $S_j$ is the set of sample indices in segment $j$ and $L_j = |S_j|$.
+
+\subsection{Power Tier Classification}
+
+Given thresholds $\theta_H > \theta_L > 0$ (defaults: $\theta_H = 0.10$,
+$\theta_L = 0.01$):
+
+\[
+    \text{tier}(j) = \begin{cases}
+        \textsc{High} & \text{if } \rms_j \geq \theta_H, \\
+        \textsc{Mid}  & \text{if } \theta_L \leq \rms_j < \theta_H, \\
+        \textsc{Skip} & \text{if } \rms_j < \theta_L.
+    \end{cases}
+\]
+
+\subsection{Pool Construction}
+
+From the classified segments, two pools are constructed:
+\begin{itemize}
+    \item \textbf{Mask pool}: All individual indices in High or Mid segments.
+    \item \textbf{Data pool}: All indices $i$ in High or Mid segments
+          such that $[i, i+16)$ lies entirely within that segment.
+\end{itemize}
+
+Packet index selection (Section~\ref{sec:packet}) draws from these pools,
+ensuring no embedding occurs in quiet signal regions where QIM distortion
+would be perceptible.
+
+\begin{remark}[Threshold margin]
+Thresholds should be set with margin above the QIM delta.  QIM modifies
+samples by at most $\Delta$, shifting the segment RMS by approximately
+$\Delta / \sqrt{L}$.  For $\Delta = 0.005$ and $L = 4096$:
+$\Delta / \sqrt{L} \approx 7.8 \times 10^{-5}$,
+which is negligible relative to $\theta_L = 0.01$.
+\end{remark}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Frequency-Domain Embedding}
+\label{sec:freq}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Analysis}
+
+The signal is partitioned into $F$ non-overlapping frames of $W$ samples
+(default $W = 1024$, must be a power of 2).  Incomplete tail frames are
+discarded to ensure exact IDFT round-trip.
+
+For each frame $f$:
+\begin{align}
+    X_f[k] &= \sum_{n=0}^{W-1} x_f[n] \, e^{-j 2\pi k n / W}, \quad k = 0, \ldots, W-1, \\
+    |X_f[k]| &= \sqrt{\mathrm{Re}(X_f[k])^2 + \mathrm{Im}(X_f[k])^2}, \\
+    \angle X_f[k] &= \mathrm{atan2}(\mathrm{Im}(X_f[k]), \mathrm{Re}(X_f[k])).
+\end{align}
+
+The DFT is computed via a radix-2 Cooley--Tukey FFT in~C.
+
+\subsection{Magnitude Embedding}
+
+Only bins in the range $[k_{\min}, k_{\max})$ are eligible (defaults:
+$k_{\min} = 10$, $k_{\max} = 400$), excluding DC and very low frequencies
+which carry perceptually critical content.
+
+The eligible magnitudes from non-Skip frames are flattened into a single
+array $\mathbf{m} = (m_0, m_1, \ldots)$.  Mask and data pools are
+constructed over indices of $\mathbf{m}$ (analogous to Section~\ref{sec:rms}).
+
+Mask samples use non-negative mod-4 QIM (Section~\ref{sec:nonneg-qim}).
+Data samples use non-negative mod-2 QIM.
+
+\subsection{Synthesis}
+
+After embedding, the modified magnitudes $m'_i$ are scattered back to
+their per-frame positions.  The time-domain signal is reconstructed:
+\begin{enumerate}
+    \item Rebuild the complex spectrum from modified magnitudes and
+          \emph{original} phases:
+          $X'_f[k] = m'_k \cdot e^{j \angle X_f[k]}$ for $k = 0, \ldots, W/2$.
+    \item Enforce conjugate symmetry: $X'_f[W-k] = \overline{X'_f[k]}$
+          for $k = 1, \ldots, W/2-1$.
+    \item Apply IDFT: $x'_f[n] = \frac{1}{W} \sum_{k=0}^{W-1} X'_f[k] \, e^{j 2\pi kn / W}$.
+\end{enumerate}
+
+\begin{remark}
+Phase preservation is critical: the decoder must compute the \emph{same}
+DFT on the watermarked signal.  Since only magnitudes are modified, the
+decoder's phase angles will differ slightly due to floating-point arithmetic,
+but the magnitude round-trip is exact up to the DFT's numerical precision.
+\end{remark}
+
+\subsection{Frequency-Domain QIM Delta}
+
+Frequency magnitudes can be much larger than normalised PCM samples.
+A separate delta $\Delta_f$ (default 0.05) controls the frequency-domain
+step size, independent of the time-domain $\Delta_t$ (default 0.005).
+
+The SNR impact in the frequency domain is analogous:
+\[
+    \snr_f = 20 \log_{10}\!\left(\frac{\rms(\mathbf{m})}{\Delta_f / 2}\right) \text{ dB}.
+\]
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Dither}
+\label{sec:dither}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Motivation}
+
+QIM places modified samples on a regular lattice.  An attacker performing
+statistical analysis could detect that some samples sit on a grid while
+neighbouring samples do not.  Dither counters this by adding small
+perturbations to \emph{all} non-payload samples, making the entire
+signal appear uniformly noisy.
+
+\subsection{Time-Domain Dither}
+
+For each sample index $n$:
+\begin{enumerate}
+    \item Generate $u_n \sim \mathcal{U}(-\alpha, +\alpha)$ from a ChaCha20 CSPRNG
+          seeded with $\sigma_\text{dither} = \sigma \xor (0, 0, \text{0xFF}, 0, \ldots)$
+          (byte 2 flipped for stream independence).
+    \item If $n \notin \mathcal{P}$ (the set of protected indices):
+          $x_n \leftarrow \mathrm{clamp}(x_n + u_n, -1, 1)$.
+    \item If $n \in \mathcal{P}$: leave $x_n$ unchanged (but still
+          consume $u_n$ to maintain RNG synchronisation).
+\end{enumerate}
+
+Default intensity: $\alpha = 2 / 32768 \approx 6.1 \times 10^{-5}$
+(two least-significant bits of 16-bit PCM).
+
+The protected set $\mathcal{P}$ is the union of all mask indices and
+data regions $[\mathrm{data\_index}, \mathrm{data\_index} + 16)$ across
+all packets.
+
+\subsection{Frequency-Domain Dither}
+
+For frequency-domain embedding, dither is applied to magnitude bins
+\emph{before} IDFT synthesis:
+\begin{enumerate}
+    \item Generate $u_i \sim \mathcal{U}(-\alpha_f, +\alpha_f)$ per flat-magnitude index.
+    \item If $i \notin \mathcal{P}_f$: $m_i \leftarrow \max(0, m_i + u_i)$.
+\end{enumerate}
+
+The intensity is auto-scaled: $\alpha_f = \alpha \cdot (\Delta_f / \Delta_t)$.
+
+\begin{proposition}[Dither does not affect extraction]
+Since the decoder reads only from indices in $\mathcal{P}$ (or $\mathcal{P}_f$),
+and dither skips all protected indices, the embedded data is unaffected.
+\end{proposition}
+
+\subsection{Audibility Analysis}
+
+The dither noise power per sample is:
+\[
+    \sigma_\text{dither}^2 = \frac{\alpha^2}{3}
+    \quad\Rightarrow\quad
+    \sigma_\text{dither} = \frac{\alpha}{\sqrt{3}}.
+\]
+
+For the default $\alpha = 6.1 \times 10^{-5}$:
+$\sigma_\text{dither} \approx 3.5 \times 10^{-5}$.
+
+For a typical signal with $\rms(x) = 0.2$:
+\[
+    \snr_\text{dither} = 20 \log_{10}\!\left(\frac{0.2}{3.5 \times 10^{-5}}\right) \approx 75 \text{ dB}.
+\]
+
+This is well above the 50\,dB empirical threshold measured on real audio
+(My Own Summer, 16-bit 44.1kHz) and far above the 20\,dB threshold
+generally considered transparent for audio watermarking.
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Quality Metrics}
+\label{sec:quality}
+% ──────────────────────────────────────────────────────────────────
+
+Given original signal $\mathbf{x}$ and watermarked signal $\mathbf{x}'$,
+both of length $N$:
+
+\begin{align}
+    \mathbf{d} &= \mathbf{x}' - \mathbf{x} && \text{(difference signal)} \\[4pt]
+    \snr &= 20 \log_{10}\!\left(\frac{\rms(\mathbf{x})}{\rms(\mathbf{d})}\right) \text{ dB}
+    && \text{where } \rms(\mathbf{v}) = \sqrt{\frac{1}{N}\sum_{n} v_n^2} \\[4pt]
+    \delta_{\max} &= \max_n \abs{d_n} && \text{(worst-case distortion)} \\[4pt]
+    \bar{\delta} &= \frac{1}{N}\sum_n \abs{d_n} && \text{(mean distortion)} \\[4pt]
+    S_\text{diff} &= \max_k \abs{|\F(\mathbf{x}')[k]| - |\F(\mathbf{x})[k]|}
+    && \text{(max spectral magnitude difference)}
+\end{align}
+
+Empirical measurements on real audio (My Own Summer, 44.1kHz stereo):
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Scenario & SNR (dB) & $\delta_{\max}$ & $S_{\text{diff}}$ \\
+\midrule
+Embedding only ($\Delta_t = 0.005$) & $> 30$ & $< 0.01$ & $< 5.0$ \\
+Embedding + dither ($\alpha = 2\,\text{LSB}$) & $> 30$ & $< 0.01$ & $< 5.0$ \\
+Pure dither ($\alpha = 2\,\text{LSB}$) & $> 50$ & $< 10^{-4}$ & $< 0.5$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Security Analysis}
+\label{sec:security}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Key Space}
+
+The master seed $\sigma$ is 32 bytes (256 bits), giving a key space of
+$2^{256}$.  The CSPRNG (ChaCha20) is a well-studied stream cipher with
+no known practical attacks below brute force.
+
+\subsection{Extraction Requirements}
+
+An attacker attempting to extract the hidden data needs:
+\begin{enumerate}
+    \item \textbf{The seed $\sigma$}: to locate mask and data sample positions.
+          Without $\sigma$, the attacker cannot determine which of the millions
+          of samples carry information.
+    \item \textbf{The QIM delta $\Delta$}: to extract mod-4 residues from mask
+          samples and mod-2 bits from data samples.  The wrong $\Delta$ yields
+          incorrect quantisation indices and thus garbage output.
+    \item \textbf{Configuration parameters}: domain, RMS thresholds, segment
+          size, frequency bin range.  These determine the eligible pools and
+          thus which sample positions the CSPRNG selects from.
+\end{enumerate}
+
+\subsection{Statistical Resistance}
+
+\begin{itemize}
+    \item \textbf{Without dither}: Modified samples lie on a QIM lattice
+          ($\Delta$-spaced grid), while unmodified samples retain their
+          original distribution.  A statistical test comparing sample-value
+          distributions could detect the lattice pattern.
+    \item \textbf{With dither}: All non-payload samples receive random
+          perturbations, obscuring the boundary between modified and
+          unmodified regions.  The entire signal exhibits uniform micro-noise.
+\end{itemize}
+
+\subsection{Per-Packet Cipher}
+
+Each packet generates an independent cipher from a separate ChaCha20 stream
+(byte 0 of seed flipped).  This means:
+\begin{itemize}
+    \item Identical payloads in different packets produce different embedded
+          bit patterns.
+    \item Knowledge of one packet's cipher does not reveal others.
+    \item The header magic provides a quick wrong-key check (probability of
+          false positive: $\approx 2^{-32}$).
+\end{itemize}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{WAV I/O}
+\label{sec:wav}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Sample Representation}
+
+Internal: $x \in [-1.0, 1.0]$ as \texttt{f64}.
+
+\textbf{Decode (file $\to$ internal):}
+\[
+    x = \frac{\text{i16\_sample}}{32768.0}.
+\]
+
+\textbf{Encode (internal $\to$ file):}
+\[
+    \text{i16\_sample} = \mathrm{clamp}\!\left(\round(x \cdot 32768.0),\; -32768,\; 32767\right).
+\]
+
+\begin{remark}[Symmetry constant]
+Both directions use $32768.0$.  An earlier design used $32767.0$ for encoding,
+causing asymmetric quantisation error ($\sim 4 \times 10^{-5}$ vs
+$\sim 3 \times 10^{-5}$).  Using the same constant ensures the round-trip
+error is symmetric and bounded by $1/(2 \cdot 32768) \approx 1.5 \times 10^{-5}$.
+\end{remark}
+
+\begin{theorem}[QIM survives i16 round-trip]
+\label{thm:wav-roundtrip}
+For $\Delta \gg 1/32768 \approx 3.05 \times 10^{-5}$, QIM-embedded bits
+survive the \texttt{f64} $\to$ \texttt{i16} $\to$ \texttt{f64} round-trip.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The i16 round-trip introduces at most $\epsilon = 1/(2 \cdot 32768)$
+error per sample.  For extraction to succeed, the watermarked sample
+$x'$ must remain in the Voronoi region of its QIM lattice point $q^*\Delta$.
+The Voronoi radius is $\Delta/2$.  If $\epsilon < \Delta/2$, i.e.
+$\Delta > 2\epsilon \approx 3.05 \times 10^{-5}$, extraction is correct.
+At $\Delta = 0.005$, the margin is $> 160\times$.
+\end{proof}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{FFT Implementation}
+\label{sec:fft}
+% ──────────────────────────────────────────────────────────────────
+
+The DFT/IDFT is implemented in C using the radix-2 Cooley--Tukey algorithm:
+
+\begin{itemize}
+    \item In-place computation with bit-reversal permutation.
+    \item Input length must be a power of 2.
+    \item Split real/imaginary arrays (\texttt{double *re, *im}).
+    \item IDFT via: conjugate $\to$ FFT $\to$ conjugate $\to$ scale by $1/N$.
+    \item Complexity: $O(N \log N)$.
+\end{itemize}
+
+Additional C-level utilities: RMS computation, complex magnitude
+($\sqrt{\mathrm{Re}^2 + \mathrm{Im}^2}$), complex phase
+($\mathrm{atan2}(\mathrm{Im}, \mathrm{Re})$).
+
+Rust FFI bindings validate all preconditions (power-of-2 length,
+matching array lengths) before calling C, returning typed errors
+via \texttt{FftError}.
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Complete Pipeline}
+\label{sec:pipeline}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Encoding}
+
+\begin{algorithm}[H]
+\caption{StenoWav Encoding Pipeline}
+\begin{algorithmic}[1]
+\Require WAV file path, data bytes $D$, seed $\sigma$, config $C$
+\Ensure Watermarked WAV file
+\State $\mathbf{x} \gets \text{read\_wav}(\text{path})[\text{channel}]$
+\State $\text{segments} \gets \text{analyze\_rms}(\mathbf{x}, C)$
+\State $(\text{mask\_pool}, \text{data\_pool}) \gets \text{build\_pools}(\text{segments})$
+\State $N_D \gets \lceil |D| / 2 \rceil$ \Comment{data packets}
+\State $H \gets \text{serialize\_header}(\text{domain}, |D|, N_D)$ \Comment{14 bytes}
+\State $\text{payload} \gets H \| \text{pad}(D)$
+\For{$p = 0$ \textbf{to} $6 + N_D$}
+    \State $\text{idx} \gets \text{select\_indices}(\sigma, p, \text{pools})$
+    \State $K_p \gets \text{generate\_cipher}(\sigma, p)$
+    \State Embed $K_p$ into mask samples via mod-4 QIM
+    \State Embed $\text{payload}[2p:2p{+}2] \xor K_p$ into data region via mod-2 QIM
+\EndFor
+\If{dither enabled}
+    \State $\mathcal{P} \gets \text{collect\_protected\_indices}()$
+    \State Apply dither to $\mathbf{x}[n]$ for $n \notin \mathcal{P}$
+\EndIf
+\State $\text{write\_wav}(\text{output}, \mathbf{x})$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Decoding}
+
+\begin{algorithm}[H]
+\caption{StenoWav Decoding Pipeline}
+\begin{algorithmic}[1]
+\Require Watermarked WAV path, seed $\sigma$, config $C$
+\Ensure Extracted data bytes or error
+\State $\mathbf{x}' \gets \text{read\_wav}(\text{path})[\text{channel}]$
+\State Recompute segments and pools (same as encoding)
+\For{$p = 0$ \textbf{to} $6$} \Comment{Extract header}
+    \State Extract cipher $K_p$ from mask samples
+    \State Extract payload $\xor$ $K_p$ from data region
+\EndFor
+\State Validate magic = \texttt{STEN}; if wrong, return error
+\State Parse $|D|$ and $N_D$ from header
+\For{$p = 7$ \textbf{to} $6 + N_D$} \Comment{Extract data}
+    \State Extract cipher and payload (same as header)
+\EndFor
+\State Truncate to $|D|$ bytes; return
+\end{algorithmic}
+\end{algorithm}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{API Reference}
+\label{sec:api}
+% ──────────────────────────────────────────────────────────────────
+
+\subsection{Primary Interface}
+
+\begin{lstlisting}[language={}]
+Steno::encode(input_path, output_path, data, key, config) -> Result<(), StenoError>
+Steno::decode(watermarked_path, key, config)              -> Result<Vec<u8>, StenoError>
+\end{lstlisting}
+
+\subsection{In-Memory Interface}
+
+\begin{lstlisting}[language={}]
+Steno::encode_samples(samples, data, key, config) -> Result<(), StenoError>
+Steno::decode_samples(samples, key, config)        -> Result<Vec<u8>, StenoError>
+\end{lstlisting}
+
+\subsection{Configuration Parameters}
+
+\begin{center}
+\begin{tabular}{@{}llcl@{}}
+\toprule
+Parameter & Type & Default & Description \\
+\midrule
+\texttt{domain} & enum & Time & Time or Frequency embedding \\
+\texttt{time\_delta} & f64 & 0.005 & QIM $\Delta$ for PCM samples \\
+\texttt{freq\_delta} & f64 & 0.05 & QIM $\Delta$ for magnitudes \\
+\texttt{rms\_high} & f64 & 0.10 & High power tier threshold \\
+\texttt{rms\_low} & f64 & 0.01 & Skip tier threshold \\
+\texttt{rms\_segment\_size} & usize & 4096 & Samples per RMS segment \\
+\texttt{freq\_window\_size} & usize & 1024 & FFT window (power of 2) \\
+\texttt{freq\_min\_bin} & usize & 10 & Lowest eligible frequency bin \\
+\texttt{freq\_max\_bin} & usize & 400 & Highest eligible bin (excl.) \\
+\texttt{dither\_enabled} & bool & false & Enable noise dither \\
+\texttt{dither\_intensity} & f64 & $\sim$6.1e-5 & Max perturbation ($\sim$2 LSB) \\
+\texttt{channel} & usize & 0 & Audio channel (0 = left) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Capacity Analysis}
+\label{sec:capacity}
+% ──────────────────────────────────────────────────────────────────
+
+Each packet carries 2 bytes and uses $\sim$24 sample positions.  For a
+message of $B$ bytes:
+\begin{align}
+    N_\text{data} &= \ceil{B / 2}, \\
+    N_\text{total} &= 7 + N_\text{data}, \\
+    \text{samples used} &= 24 \cdot N_\text{total}.
+\end{align}
+
+To avoid packet collisions (overlapping random indices), the eligible pool
+should be $\gg 24 \cdot N_\text{total}$.  A conservative guideline:
+\[
+    |\text{pool}| \geq 100 \times 24 \cdot N_\text{total}.
+\]
+
+For typical 44.1kHz stereo audio (3 minutes $\approx$ 7.9M samples per channel),
+and assuming 50\% of segments are eligible, the pool size is $\sim$4M,
+supporting $\sim$6900 packets $\approx$ 13.8\,KB of hidden data.
+
+
+% ──────────────────────────────────────────────────────────────────
+\section{Future Directions}
+\label{sec:future}
+% ──────────────────────────────────────────────────────────────────
+
+\begin{enumerate}
+    \item \textbf{Variable packet sizes}: Expand beyond 9 samples per
+          packet (e.g., 17 for 32-bit cipher + 32 data bits).
+    \item \textbf{Higher bit density}: Use higher-order QIM ($M > 4$
+          for masks, $M > 2$ for data) to increase bits per sample.
+    \item \textbf{AWGN robustness optimisation}: Sweep $\Delta$, RMS
+          thresholds, and bit density across thousands of noise samples
+          to find the Pareto frontier of robustness vs.\ imperceptibility.
+    \item \textbf{Compression robustness}: Test and harden against MP3,
+          AAC, and Opus transcoding.
+    \item \textbf{Streaming / real-time}: Adapt the frame-based
+          architecture for low-latency applications.
+    \item \textbf{Error correction}: Add forward error correction (e.g.,
+          Reed--Solomon) for graceful degradation under channel noise.
+    \item \textbf{Multiple channel embedding}: Spread data across stereo
+          channels for increased capacity and redundancy.
+\end{enumerate}
+
+
+% ──────────────────────────────────────────────────────────────────
+\appendix
+\section{Module Map}
+\label{app:modules}
+% ──────────────────────────────────────────────────────────────────
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+File & Responsibility \\
+\midrule
+\texttt{src/steno.rs} & Public API: \texttt{Steno}, \texttt{StenoConfig}, \texttt{StenoError} \\
+\texttt{src/embed.rs} & Dual-domain engine, RMS analysis, header, \texttt{encode\_full}/\texttt{decode\_full} \\
+\texttt{src/packet.rs} & Packet structure, index selection, encode/decode per packet \\
+\texttt{src/cipher.rs} & Cipher key type, generation, mod-4 QIM embed/extract \\
+\texttt{src/qim.rs} & Core QIM primitives (mod-2) \\
+\texttt{src/dither.rs} & Dither engine, protected index collection, quality metrics \\
+\texttt{src/fft.rs} & Rust FFI bindings to C FFT library \\
+\texttt{src/wav.rs} & 16-bit PCM WAV reader/writer \\
+\texttt{csrc/math\_ops.c} & C math library: FFT, IFFT, RMS, complex ops \\
+\texttt{build.rs} & Compiles C via \texttt{cc} crate \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}
